@@ -32,7 +32,7 @@ class WebsocketProtocol
 
 		EXPORT std::pair<char*, int> handShake(const char* data);
 		EXPORT std::pair<char*, int> unmaskMessage(char* msg, const int msgLength);
-		EXPORT std::pair<unsigned char*, int> encodeMessage(const char* msg, const int msgLength);
+		EXPORT std::pair<char*, int> encodeMessage(const char* msg, const int msgLength);
 
 	private:
 		class WSP_imp;

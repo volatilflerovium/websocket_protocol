@@ -33,10 +33,11 @@ class WebsocketProtocol::WSP_imp
 
 		std::pair<char*, int> handShake(const char* data);
 		std::pair<char*, int> unmask(char* data, const int dataLength);
-		std::pair<unsigned char*, int> encodeData(const char* text, const int dataLength);
+		std::pair<char*, int> encodeData(const char* text, const int dataLength);
 
-	private:	
-		unsigned char* m_pack{nullptr};
+	private:
+		SHA1 m_sha1;
+		char* m_pack{nullptr};
 		int m_packSize{0};
 		char m_hashSha1[21];
 		char* m_encode64{nullptr};
@@ -68,21 +69,21 @@ namespace
 	constexpr const char* PROTOCOL_HEADER="HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ";
 	constexpr int headerLength=_length(PROTOCOL_HEADER)+4;
 }
+
 //----------------------------------------------------------------------
 
 void WebsocketProtocol::WSP_imp::encoder(unsigned char a, unsigned char b, unsigned char c, int j)
 {
-	m_encode64[j++]=c_base64Index[a>>2];
-	m_encode64[j++]=c_base64Index[((a&3)<<4) | (b>>4)];
-	m_encode64[j++]=c_base64Index[((b&15)<<2) | (c>>6)];				
-	m_encode64[j++]=c_base64Index[c & 63];		
+	m_encode64[j]=c_base64Index[a>>2];
+	m_encode64[j+1]=c_base64Index[((a&3)<<4) | (b>>4)];
+	m_encode64[j+2]=c_base64Index[((b&15)<<2) | (c>>6)];				
+	m_encode64[j+3]=c_base64Index[c & 63];		
 }
 
 //----------------------------------------------------------------------
 
 void WebsocketProtocol::WSP_imp::rawHash(const char* part1)
 {
-	static SHA1 m_sha1;
 	m_sha1.update(part1);
 	m_sha1.update(PROTOCOL_KEY);
 	std::string str=m_sha1.final();
@@ -147,13 +148,13 @@ std::pair<char*, int> WebsocketProtocol::WSP_imp::base64Encode()
 		}
 	}
 
-	m_encode64[j++]='\r';
-	m_encode64[j++]='\n';
-	m_encode64[j++]='\r';
-	m_encode64[j++]='\n';
-	m_encode64[j]=0;
+	m_encode64[j]='\r';
+	m_encode64[j+1]='\n';
+	m_encode64[j+2]='\r';
+	m_encode64[j+3]='\n';
+	m_encode64[j+4]=0;
 
-	return std::pair<char*, int>(m_encode64, j);
+	return std::pair<char*, int>(m_encode64, j+4);
 }
 
 //----------------------------------------------------------------------
@@ -192,67 +193,70 @@ std::pair<char*, int> WebsocketProtocol::WSP_imp::unmask(char* data, const int d
 	for(int i=0; i<dataLength-offset; i++) {
 		m_umkData[i]=data[offset+i]^data[mask+(i%4)];
 	}
+
 	return std::pair<char*, int>(m_umkData, dataLength-offset);
-	//return result;
 }
 
 //----------------------------------------------------------------------
 
-std::pair<unsigned char*, int> WebsocketProtocol::WSP_imp::encodeData(const char* data, const int dataLength)
+std::pair<char*, int> WebsocketProtocol::WSP_imp::encodeData(const char* data, const int dataLength)
 {
 	const unsigned char b1=0x80 | (0x1 & 0x0f);
 	m_dataLength=0;
 	
-	if(m_packSize<dataLength+8){
+	if(m_packSize<dataLength+12){
 		if(m_pack){
 			delete[] m_pack;
 		}
-		m_packSize=dataLength+8;
-		m_pack=new unsigned char[m_packSize];
+		m_packSize=dataLength+12;
+		m_pack=new char[m_packSize];
 	}
-	
-	m_pack[0]=static_cast<unsigned char>(b1);
+	unsigned char* pack=reinterpret_cast<unsigned char*>(m_pack);
+
+	pack[0]=static_cast<unsigned char>(b1);
 
 	if(dataLength<=125){
-		m_pack[1]=static_cast<unsigned char>(dataLength) & ~(1<<7);		
+		pack[1]=static_cast<unsigned char>(dataLength) & ~(1<<7);		
 		m_dataLength=2;
 	}
 	else if(dataLength<65536){
-		m_pack[1]=126;
-		m_pack[2]=static_cast<unsigned char>(dataLength>>8);
-		m_pack[3]=static_cast<unsigned char>(dataLength);
+		pack[1]=126;
+		pack[2]=static_cast<unsigned char>(dataLength>>8);
+		pack[3]=static_cast<unsigned char>(dataLength);
 
 		m_dataLength=4;
 	}
 	else{// if(length>=65536)
-		m_pack[1]=static_cast<unsigned char>(127);
+		pack[1]=static_cast<unsigned char>(127);
 		
-		uint32_t d=static_cast<uint32_t>(dataLength);
-		unsigned char data[4];
+		uint64_t d=static_cast<uint64_t>(dataLength);
+		unsigned char data[8];
 		std::memcpy(data, &d, sizeof(d));
 
-		m_pack[2]=data[3];
-		m_pack[3]=data[2];
-		m_pack[4]=data[1];
-		m_pack[5]=data[0];
+		pack[2]=data[7];
+		pack[3]=data[6];
+		pack[4]=data[5];
+		pack[5]=data[4];
+		pack[6]=data[3];
+		pack[7]=data[2];
+		pack[8]=data[1];
+		pack[9]=data[0];
 
-		m_dataLength=6;
+		m_dataLength=10;
 	}
 
 	std::memcpy(&m_pack[m_dataLength], data, dataLength*sizeof(char));
 	m_dataLength+=dataLength;
 	m_pack[m_dataLength]=0;
 	
-	return std::pair<unsigned char*, int>(m_pack, m_dataLength);
+	return std::pair<char*, int>(m_pack, m_dataLength);
 }
 
 //----------------------------------------------------------------------
 
 std::pair<char*, int> WebsocketProtocol::WSP_imp::handShake(const char* data)
 {
-	static std::string headers;
-	headers.clear();
-	headers=data;
+	std::string headers{data};
 
 	std::size_t found=headers.find("Sec-WebSocket-Key:");
 	if(found!=std::string::npos){
@@ -260,15 +264,9 @@ std::pair<char*, int> WebsocketProtocol::WSP_imp::handShake(const char* data)
 		if(found!=std::string::npos){
 			std::size_t found2=headers.find("\r\n", found);
 			if(found2!=std::string::npos){
-			
-				/*std::string acceptKey=headers.substr(found+2, found2-found-2);
-				rawHash(acceptKey.c_str());
-				*/
-				
 				headers[found2]=0;
-				const char* dd=&headers[found+2];
 
-				rawHash(dd);
+				rawHash(&headers[found+2]);
 
 				return base64Encode();
 			}
@@ -304,7 +302,7 @@ std::pair<char*, int> WebsocketProtocol::unmaskMessage(char* msg, const int msgL
 	return m_protocol->unmask(msg, msgLength);
 }
 
-std::pair<unsigned char*, int> WebsocketProtocol::encodeMessage(const char* msg, const int msgLength)
+std::pair<char*, int> WebsocketProtocol::encodeMessage(const char* msg, const int msgLength)
 {
 	return m_protocol->encodeData(msg, msgLength);
 }
